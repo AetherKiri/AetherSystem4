@@ -49,6 +49,28 @@ static bool CGManager_GetInfo(struct string *cg_name, int *width, int *height, i
 	return true;
 }
 
+static void CGManager_GetSize(struct string *name, int *width, int *height)
+{
+	struct cg_metrics metrics;
+	if (!name || !asset_cg_get_metrics_by_name(name->text, &metrics)) return;
+	*width = metrics.w;
+	*height = metrics.h;
+}
+
+static int CGManager_GetWidth(struct string *name)
+{
+	int width = 0, height = 0;
+	CGManager_GetSize(name, &width, &height);
+	return width;
+}
+
+static int CGManager_GetHeight(struct string *name)
+{
+	int width = 0, height = 0;
+	CGManager_GetSize(name, &width, &height);
+	return height;
+}
+
 //static int CGManager_GetCountOfDataFromArchive(void);
 //static void CGManager_GetTitleByIndexFromArchive(int index, struct string **cg_name);
 //static int CGManager_SearchTitleFromArchive(struct string *cg_name);
@@ -61,7 +83,11 @@ HLL_LIBRARY(CGManager,
 	    HLL_EXPORT(Init, CGManager_Init),
 	    HLL_EXPORT(LoadArchive, CGManager_LoadArchive),
 	    HLL_EXPORT(IsExist, CGManager_IsExist),
+	    HLL_EXPORT(IsExistCG, CGManager_IsExist),
 	    HLL_EXPORT(GetInfo, CGManager_GetInfo),
+	    HLL_EXPORT(GetSize, CGManager_GetSize),
+	    HLL_EXPORT(GetWidth, CGManager_GetWidth),
+	    HLL_EXPORT(GetHeight, CGManager_GetHeight),
 	    HLL_TODO_EXPORT(GetCountOfDataFromArchive, CGManager_GetCountOfDataFromArchive),
 	    HLL_TODO_EXPORT(GetTitleByIndexFromArchive, CGManager_GetTitleByIndexFromArchive),
 	    HLL_TODO_EXPORT(SearchTitleFromArchive, CGManager_SearchTitleFromArchive),

@@ -96,7 +96,7 @@ static char *skip_space_and_comments(char *text)
 	}
 }
 
-static bool parse_monster_info(char *text)
+static bool parse_monster_info(char *text, bool dialogue_gbk)
 {
 	struct monster *current_monster = NULL;
 	struct motion *current_motion = NULL;
@@ -143,7 +143,7 @@ static bool parse_monster_info(char *text)
 				}
 				current_motion = &current_monster->motions[n];
 			} else if (MATCH("名前 = " QUOTED_STRING, string_buf)) {
-				current_monster->name = utf2sjis(string_buf, 0);
+				current_monster->name = utf2cjk(string_buf, 0, dialogue_gbk);
 			} else if (MATCH("データ = " QUOTED_STRING, string_buf)) {
 				current_monster->poly_name = utf2sjis(string_buf, 0);
 			} else if (MATCH("スケール = %f", &f)) {
@@ -175,7 +175,7 @@ static bool parse_monster_info(char *text)
 			} else if (MATCH("}")) {
 				current_motion = NULL;
 			} else if (MATCH("名前 = " QUOTED_STRING, string_buf)) {
-				current_motion->name = utf2sjis(string_buf, 0);
+				current_motion->name = utf2cjk(string_buf, 0, dialogue_gbk);
 			} else if (MATCH("データ = " QUOTED_STRING, string_buf)) {
 				current_motion->data_name = utf2sjis(string_buf, 0);
 // XXX: sscanf doesn't match this string on Windows for some reason...
@@ -238,7 +238,7 @@ static bool MonsterInfo_Load(struct string *filename)
 	else if (!strncmp(first, gbk_header, sizeof(gbk_header) - 1))
 		use_gbk = true;
 	char *text = sjis2utf(sjis_text, dfile->size);
-	bool ok = parse_monster_info(text);
+	bool ok = parse_monster_info(text, dialogue_gbk);
 	use_gbk = dialogue_gbk;
 	free(text);
 	free(sjis_text);

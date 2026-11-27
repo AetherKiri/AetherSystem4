@@ -29,12 +29,15 @@ struct config {
 	char *game_name;
 	char *boot_name;
 	char *ain_filename;
+	char *ain_basename_utf8;
 	char *vm_name;
 	char *game_dir;
 	char *save_dir;
 	char *home_dir;
 	int view_width;
 	int view_height;
+	bool view_width_set;
+	bool view_height_set;
 	size_t mixer_nr_channels;
 	char **mixer_channels;
 	int *mixer_volumes;
@@ -88,14 +91,56 @@ void screenshot_save(void);
 #define XSYS4_DATA_DIR "/usr/local/share/xsystem4"
 #endif
 
+#ifdef __SWITCH__
+#define MMAP_IF_64BIT 0
+#else
 #define MMAP_IF_64BIT (sizeof(void*) >= 8 ? ARCHIVE_MMAP : 0)
+#endif
 
+extern bool game_daibanchou;
 extern bool game_daibanchou_en;
+extern bool game_daiteikoku;
+extern bool game_haruurare;
+extern bool game_rance01;
+extern bool game_rance02;
 extern bool game_rance02_mg;
+extern bool game_rance6;
 extern bool game_rance6_mg;
 extern bool game_rance7_mg;
+extern bool game_sengokurance;
 extern bool game_rance8;
 extern bool game_rance8_mg;
+extern bool game_rance9;
+extern bool game_rance10;
+extern bool game_dohnadohna;
+extern bool game_evenicle;
+extern bool game_evenicle_rance;
+extern bool game_evenicle_rance_cn;
+extern bool game_evenicle_gaiden;
+extern bool game_bladebriders;
+extern bool game_evenicle2;
+extern bool game_evenicle2_rance;
+extern bool game_haharanman;
+extern bool game_okusama;
+extern bool game_okusama_ntr;
+extern bool game_night_remaster;
+extern bool game_oyakorankan;
+extern bool game_toushin3;
+extern bool game_rance03;
 extern bool game_dungeons_and_dolls;
+extern bool game_escalayer_reboot;
+extern bool game_galzoo;
+extern bool game_ixseal;
+extern bool game_tsumashibori;
+extern bool game_tsumamigui3;
+extern bool game_tsumamigui3_jun;
+extern bool game_tsumamigui3_ntr;
+extern bool game_maman;
+extern bool game_waidonyo;
+extern bool game_dorapeko;
+extern bool game_pascha3;
+extern bool game_sanbiki;
+
+bool sys_is_sdl_main_thread(void);
 
 #endif /* XSYSTEM4_H */

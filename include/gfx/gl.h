@@ -17,13 +17,19 @@
 #ifndef SYSTEM4_GFX_GL_H
 #define SYSTEM4_GFX_GL_H
 
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+
 #ifdef USE_GLES
-#if defined(__APPLE__)
+#if defined(__APPLE__) && TARGET_OS_IPHONE
 #include <OpenGLES/ES3/gl.h>
+#elif defined(__APPLE__) && !__has_include(<GLES3/gl3.h>)
+#include <OpenGL/gl3.h>
 #else
 #include <GLES3/gl3.h>
 #endif
-#elif defined(__APPLE__) && defined(XSYSTEM4_EMBEDDED)
+#elif defined(__APPLE__)
 #include <OpenGL/gl3.h>
 #else
 #include <GL/glew.h>

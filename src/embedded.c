@@ -4,13 +4,15 @@
 #include "system4.c"
 #undef main
 #include "embedded.h"
+#include "modifier.h"
 #include <setjmp.h>
 #include <pthread.h>
 
 void xsystem4_vm_shutdown(void);
 void xsystem4_libraries_destroy(void);
 void asset_manager_fini(void);
-void audio_fini(void);
+void audio_end_session(void);
+void mixer_fini(void);
 void gfx_font_fini(void);
 void input_reset(void);
 
@@ -35,6 +37,11 @@ _Noreturn void xsystem4_host_exit(int code)
 		pthread_exit(NULL);
 	embedded_exit_code = code;
 	longjmp(embedded_exit, 1);
+}
+
+int xsystem4_host_encoding_override(void)
+{
+	return embedded_host ? embedded_host->fixed_encoding - 1 : -1;
 }
 
 void xsystem4_host_checkpoint(void)
@@ -88,44 +95,6 @@ static void embedded_error(const char *message)
 		embedded_host->log(embedded_host->user, message);
 }
 
-static void config_free(void)
-{
-	free(config.game_name);
-	free(config.boot_name);
-	free(config.ain_filename);
-	free(config.vm_name);
-	free(config.game_dir);
-	free(config.save_dir);
-	free(config.home_dir);
-	free(config.bgi_path);
-	free(config.wai_path);
-	free(config.ex_path);
-	free(config.fnl_path);
-	for (int i = 0; i < 2; i++) free(config.font_paths[i]);
-	for (size_t i = 0; i < config.mixer_nr_channels; i++) free(config.mixer_channels[i]);
-	free(config.mixer_channels);
-	free(config.mixer_volumes);
-	free(ini_save_folder);
-	ini_save_folder = NULL;
-	config = (struct config){ .view_width = 800, .view_height = 600,
-		.default_volume = 100, .text_x_scale = 1.0f, .save_format = SAVE_FORMAT_RSM };
-}
-
-static bool embedded_config(const char *game)
-{
-	const char *names[] = { "System40.ini", "AliceStart.ini" };
-	for (unsigned i = 0; i < sizeof(names) / sizeof(*names); i++) {
-		char *candidate = path_join(game, names[i]);
-		char *path = path_get_icase(candidate);
-		free(candidate);
-		if (!path) continue;
-		bool loaded = config_init_with_ini(path);
-		free(path);
-		return loaded;
-	}
-	return false;
-}
-
 int xsystem4_host_run(const struct xsystem4_host *host, const char *game,
 		const char *save_directory, const char *font, const char *encoding)
 {
@@ -134,9 +103,11 @@ int xsystem4_host_run(const struct xsystem4_host *host, const char *game,
 	cleanup_stage = 0;
 	vm_running = false;
 	sys_error_handler = embedded_error;
-	use_gbk = false;
+	sys_exit_handler = xsystem4_host_exit;
+	set_utf8_release(false);
+	sys4_set_text_gbk(false);
 	if (!setjmp(embedded_exit)) {
-		if (!embedded_config(game))
+		if (!config_init_with_dir(game))
 			ERROR("No System40.ini or AliceStart.ini in %s", game);
 		if (config.view_width < 1 || config.view_height < 1 ||
 				config.view_width > 8192 || config.view_height > 8192)
@@ -144,8 +115,8 @@ int xsystem4_host_run(const struct xsystem4_host *host, const char *game,
 		free(config.home_dir);
 		config.home_dir = xstrdup(save_directory);
 		read_user_config();
-		if (encoding && *encoding && !set_encoding(encoding))
-			ERROR("Unsupported text encoding: %s", encoding);
+		if (encoding && *encoding)
+			sys4_set_text_gbk(!strcasecmp(encoding, "GBK"));
 		free(config.save_dir);
 		config.save_dir = xstrdup(save_directory);
 		if (font && *font) {
@@ -154,13 +125,22 @@ int xsystem4_host_run(const struct xsystem4_host *host, const char *game,
 			}
 		}
 		int error;
-		char *path = gamedir_path_icase(config.ain_filename);
+		char *path = resolve_configured_ain_path(NULL);
 		if (!path) ERROR("AIN script does not exist: %s", config.ain_filename);
+		config.ain_basename_utf8 = xstrdup(path_basename(path));
 		ain = ain_open(path, &error);
+		if (ain && !sys4_source_is_utf8 && ain_content_is_utf8(ain)) {
+			ain_free(ain);
+			set_utf8_release(true);
+			ain = ain_open(path, &error);
+		}
 		free(path);
 		if (!ain) ERROR("%s", ain_strerror(error));
 		mkdir_p(config.save_dir);
 		apply_game_specific_hacks(ain);
+		init_mai_word_table();
+		init_text_dict();
+		if (config.msgskip_delay) set_msgskip_delay(ain, config.msgskip_delay);
 		asset_manager_init();
 		embedded_exit_code = vm_execute_ain(ain);
 		xsystem4_host_game_exit(embedded_exit_code);
@@ -171,16 +151,23 @@ int xsystem4_host_run(const struct xsystem4_host *host, const char *game,
 		case 0:
 			if (vm_running) { vm_running = false; xsystem4_vm_shutdown(); }
 			break;
-		case 1: audio_fini(); break;
+		case 1: audio_end_session(); mixer_fini(); break;
 		case 2: xsystem4_libraries_destroy(); break;
 		case 3: gfx_font_fini(); break;
 		case 4: gfx_fini(); break;
 		case 5: asset_manager_fini(); break;
 		case 6: if (ain) ain_free(ain); ain = NULL; break;
-		case 7: config_free(); input_reset(); break;
+		case 7:
+			modifier_end_session();
+			sys4_reset_text_dict();
+			sys4_reset_mai_word_table();
+			reset_config();
+			input_reset();
+			break;
 		}
 	}
 	embedded_host = NULL;
 	sys_error_handler = NULL;
+	sys_exit_handler = NULL;
 	return embedded_exit_code;
 }

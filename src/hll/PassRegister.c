@@ -227,6 +227,8 @@ static bool PassRegister_SetFileName(int handle, struct string *filename)
 static int *find_number(int handle, int n)
 {
 	struct passregister *reg = registers + handle;
+	if (!reg->nr_integers)
+		return NULL;
 	return bsearch(&n, reg->integers, reg->nr_integers, sizeof(int), compare_int);
 }
 
@@ -249,6 +251,8 @@ static bool PassRegister_RegistNumber(int handle, int n)
 static char **find_text(int handle, const char *text)
 {
 	struct passregister *reg = registers + handle;
+	if (!reg->nr_strings)
+		return NULL;
 	return bsearch(&text, reg->strings, reg->nr_strings, sizeof(char*), compare_string);
 }
 
