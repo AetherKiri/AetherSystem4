@@ -26,10 +26,17 @@
 #include "parts_internal.h"
 
 static int s_modifier_font_scale_pct = 100;
+static bool s_mixed_display_text = false;
+
+void parts_set_mixed_display_text(bool enable)
+{
+	s_mixed_display_text = enable;
+}
 
 bool parts_uses_mixed_display_text(void)
 {
-	return game_evenicle_rance_cn && sys4_text_is_gbk && !sys4_source_is_utf8;
+	return (game_evenicle_rance_cn || s_mixed_display_text)
+		&& sys4_text_is_gbk && !sys4_source_is_utf8;
 }
 
 char *parts_prepare_display_text(const char *text)
@@ -213,6 +220,7 @@ void parts_text_end_session(void)
 	glyph_cache_used = 0;
 	glyph_cache_initialized = false;
 	s_modifier_font_scale_pct = 100;
+	s_mixed_display_text = false;
 }
 
 static void glyph_lru_remove(int idx)
@@ -807,8 +815,16 @@ void PE_GetPartsTextSurfaceArea(int no, int *x, int *y, int *w, int *h, int stat
 void PE_GetPartsTextFontProperty(int no, int *face, int *size, int *r, int *g, int *b,
 		float *bold, int *er, int *eg, int *eb, float *edge, int state)
 {
-	if (!parts_state_valid(--state)) return;
-	struct text_style *ts = &parts_get_text(parts_get(no), state)->ts;
+	struct parts_text *t = try_get_text(no, state);
+	if (!t) {
+		*face = 0; *size = 16;
+		*r = 255; *g = 255; *b = 255;
+		*bold = 0.0f;
+		*er = 0; *eg = 0; *eb = 0;
+		*edge = 0.0f;
+		return;
+	}
+	struct text_style *ts = &t->ts;
 	*face = ts->face; *size = ts->size;
 	*r = ts->color.r; *g = ts->color.g; *b = ts->color.b;
 	*bold = ts->bold_width;

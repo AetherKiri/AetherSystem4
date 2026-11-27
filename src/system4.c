@@ -33,7 +33,7 @@
 #include <signal.h>
 #if !defined(__SWITCH__) && !defined(XSYSTEM4_EMBEDDED)
 #define HAVE_POSIX_CRASH_HANDLER
-#ifndef ALICEHUB_IOS
+#if defined(__linux__)
 #include <ucontext.h>
 #endif
 #include <dlfcn.h>
@@ -75,6 +75,7 @@ void vm_end_session(void);
 #include "debugger.h"
 #include "gfx/gfx.h"
 #include "gfx/font.h"
+#include "input.h"
 #include "mixer.h"
 #include "savedata.h"
 #include "vm.h"
@@ -83,6 +84,7 @@ void vm_end_session(void);
 
 void set_msgskip_delay(struct ain *ain, unsigned ms);
 void apply_game_specific_hacks(struct ain *ain);
+void parts_set_mixed_display_text(bool enable);
 
 #ifdef __ANDROID__
 static pthread_t android_sdl_main_thread;
@@ -104,6 +106,7 @@ static int android_clean_return(int code)
 	android_exit_jmp_active = 0;
 	sys_exit_handler = NULL;
 	savedata_flush_on_background();
+	savedir_cleanup_memory_saves();
 	mixer_set_app_backgrounded(true);
 	gfx_android_fini();
 	return code;
@@ -575,7 +578,9 @@ static void config_init_with_utf8_codename(const char *utf8_code_name)
 				|| strstr(config.game_name, "\xd2\xec\xbf\xd5\xbf\xdf")
 				|| strstr(config.game_name, "\xd0\xb0\xd2\xb9")
 				|| strstr(config.game_name, "\xb6\xb7\xc9\xf1")
-				|| strstr(config.game_name, "\xb7\xdb\xb2\xca\xc1\xe5\xd2\xf4")))
+				|| strstr(config.game_name, "\xb7\xdb\xb2\xca\xc1\xe5\xd2\xf4")
+				|| strstr(config.game_name, "\xa4\xcf\xa1\xab\xa4\xc8\xa4\xd5\xa4\xeb\xa5\xde\xa5\xde\xa5\xf3")
+				|| strstr(config.game_name, "\xbf\xa8\xc0\xad\xb1\xa3\xbb\xa4\xd0\xad\xbb\xe1")))
 			|| (config.ain_filename && strstr(config.ain_filename, "\xc6\xde\xa4\xb7\xa4\xdc\xa4\xea"))
 			|| (config.ain_filename && !strcasecmp(config.ain_filename, "Rance10.ain")
 				&& (!config.game_name || !strstr(config.game_name, "\x83\x89\x83\x93\x83\x58")))
@@ -1114,7 +1119,7 @@ static void write_crash_report(const char *kind, const char *msg, int sig,
 		cbuf_put_hex(crash_report_buf, cap, &off, si ? (uint64_t)(uintptr_t)si->si_addr : 0, 16);
 		cbuf_puts(crash_report_buf, cap, &off, "\n");
 
-#ifndef ALICEHUB_IOS
+#if defined(__linux__)
 		ucontext_t *uc = (ucontext_t *)ucontext_ptr;
 		if (uc) {
 #if defined(__aarch64__)
@@ -1436,7 +1441,6 @@ static void init_mai_word_table(void)
 
 #ifdef __SWITCH__
 static jmp_buf switch_startup;
-void ini_abort_parse(void);
 
 static void switch_startup_error(const char *message)
 {
@@ -1710,10 +1714,29 @@ int main(int argc, char *argv[])
 #endif
 
 	mkdir_p(config.save_dir);
+	savedir_begin_memory_session();
+#if !defined(__ANDROID__) && !defined(ALICEHUB_IOS)
+	static bool mem_cleanup_registered = false;
+	if (!mem_cleanup_registered) {
+		atexit(savedir_cleanup_memory_saves);
+		mem_cleanup_registered = true;
+	}
+#endif
 #ifdef __SWITCH__
 	switch_menu4_load_display(config.save_dir);
 #endif
 	apply_game_specific_hacks(ain);
+	parts_set_mixed_display_text(
+		game_maman
+		|| game_haharanman
+		|| game_escalayer_reboot
+		|| game_pascha3
+		|| game_night_remaster
+		|| game_evenicle2_rance
+		|| game_rance01
+		|| game_rance8
+		|| game_haniwapetit
+	);
 	init_mai_word_table();
 	init_text_dict();
 	if (config.msgskip_delay)
@@ -1736,10 +1759,12 @@ int alicehub_switch_engine_main(int argc, char *argv[])
 	optind = 0;
 	if (!setjmp(switch_startup)) {
 		int result = run_xsystem4(argc, argv);
+		savedir_cleanup_memory_saves();
 		sys_error_handler = NULL;
 		sys_exit_handler = NULL;
 		return result;
 	}
+	savedir_cleanup_memory_saves();
 	sys_error_handler = NULL;
 	sys_exit_handler = NULL;
 	ini_abort_parse();
@@ -1759,19 +1784,25 @@ int xsystem4_main(int argc, char **argv)
 	set_utf8_release(false);
 	if (setjmp(target) == 0)
 		ios_exit_code = run_xsystem4(argc, argv);
-	vm_end_session();
+	sys_exit_handler = NULL;
+	ios_exit_target = NULL;
+	ini_abort_parse();
 	audio_end_session();
+	vm_end_session();
+	savedir_cleanup_memory_saves();
+	input_end_session();
 	gfx_fini();
 	asset_manager_fini();
 	if (ios_program) {
 		ain_free(ios_program);
 		ios_program = NULL;
 	}
+	free(resolved_ain_path);
+	resolved_ain_path = NULL;
 	reset_config();
+	set_utf8_release(false);
 	for (size_t i = 0; i < NR_CRASH_SIGNALS; i++)
 		sigaction(crash_signals[i], &old_sigactions[i], NULL);
-	sys_exit_handler = NULL;
-	ios_exit_target = NULL;
 	return ios_exit_code;
 }
 #endif

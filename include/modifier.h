@@ -5,10 +5,8 @@
 
 union vm_value;
 
-#ifdef XSYSTEM4_EMBEDDED
-void modifier_end_session(void);
-#endif
 void modifier_on_ain_init(void);
+void modifier_end_session(void);
 void modifier_on_frame(void);
 void modifier_on_config_loaded(void);
 void modifier_on_globals_loaded(void);

@@ -187,6 +187,8 @@ HLL_WARN_UNIMPLEMENTED(false, bool, SystemService, InitMainWindowPosAndSize);
 
 static bool SystemService_UpdateView(void)
 {
+	if (gfx_consume_frame_presented())
+		return true;
 	gfx_swap();
 	return true;
 }
@@ -327,6 +329,31 @@ enum window_settings_id {
 #define WAIT_VSYNC_JSON_KEY "wait_vsync"
 #endif
 
+static bool window_settings_uses_v14_layout(void)
+{
+	if (!ain || ain->version < 14)
+		return false;
+	int libno = ain_get_library(ain, "SystemService");
+	if (libno >= 0 && ain_get_library_function(ain, libno, "SetWaitVSyncMode") >= 0)
+		return false;
+	return true;
+}
+
+static int resolve_window_setting_id(int type)
+{
+	if (window_settings_uses_v14_layout()) {
+		switch (type) {
+		case 0: return WINDOW_SETTINGS_ASPECT_RATIO;
+		case 1: return WINDOW_SETTINGS_SCALING_TYPE;
+		case 2: return WINDOW_SETTINGS_MINIMIZE_BY_FULL_SCREEN_INACTIVE;
+		case 3: return WINDOW_SETTINGS_BACK_TO_TITLE_CONFIRM;
+		case 4: return WINDOW_SETTINGS_CLOSE_GAME_CONFIRM;
+		default: return -1;
+		}
+	}
+	return (type >= 0 && type <= WINDOW_SETTINGS_CLOSE_GAME_CONFIRM) ? type : -1;
+}
+
 static void save_window_settings(void)
 {
 	cJSON *root = cJSON_CreateObject();
@@ -337,57 +364,68 @@ static void save_window_settings(void)
 
 static void load_window_settings(void)
 {
-	cJSON *root = load_json("WindowSetting.json");
-	if (root) {
-		cJSON *v;
-		if ((v = cJSON_GetObjectItem(root, WAIT_VSYNC_JSON_KEY)))
-			window_settings.wait_vsync = cJSON_IsTrue(v);
-		cJSON_Delete(root);
+	if (!window_settings_uses_v14_layout()) {
+		cJSON *root = load_json("WindowSetting.json");
+		if (root) {
+			cJSON *v;
+			if ((v = cJSON_GetObjectItem(root, WAIT_VSYNC_JSON_KEY)))
+				window_settings.wait_vsync = cJSON_IsTrue(v);
+			cJSON_Delete(root);
+		}
 	}
 	gfx_set_wait_vsync(window_settings.wait_vsync);
 }
 
 static bool SystemService_SetWindowSetting(int type, int value)
 {
-	switch (type) {
+	bool vsync_changed = false;
+	int resolved = resolve_window_setting_id(type);
+	switch (resolved) {
 	case WINDOW_SETTINGS_ASPECT_RATIO:
 		window_settings.aspect_ratio = value;
 		break;
 	case WINDOW_SETTINGS_SCALING_TYPE:
 		window_settings.scaling_type = value;
 		break;
-	case WINDOW_SETTINGS_WAIT_VSYNC:
-		window_settings.wait_vsync = value;
-		gfx_set_wait_vsync(value);
+	case WINDOW_SETTINGS_WAIT_VSYNC: {
+		bool want = !!value;
+		if (window_settings.wait_vsync != want) {
+			window_settings.wait_vsync = want;
+			gfx_set_wait_vsync(want);
+			vsync_changed = true;
+		}
 		break;
+	}
 	case WINDOW_SETTINGS_RECORD_POS_SIZE:
-		window_settings.record_pos_size = value;
+		window_settings.record_pos_size = !!value;
 		break;
 	case WINDOW_SETTINGS_MINIMIZE_BY_FULL_SCREEN_INACTIVE:
 #ifdef SYSTEMSERVICE_MOBILE_PLATFORM
 		(void)value;
 		window_settings.minimize_by_full_screen_inactive = false;
 #else
-		window_settings.minimize_by_full_screen_inactive = value;
+		window_settings.minimize_by_full_screen_inactive = !!value;
 #endif
 		break;
 	case WINDOW_SETTINGS_BACK_TO_TITLE_CONFIRM:
-		window_settings.back_to_title_confirm = value;
+		window_settings.back_to_title_confirm = !!value;
 		break;
 	case WINDOW_SETTINGS_CLOSE_GAME_CONFIRM:
-		window_settings.close_game_confirm = value;
+		window_settings.close_game_confirm = !!value;
 		break;
 	default:
 		WARNING("Invalid window setting type: %d", type);
 		return false;
 	}
-	save_window_settings();
+	if (vsync_changed)
+		save_window_settings();
 	return true;
 }
 
 static bool SystemService_GetWindowSetting(int type, int *value)
 {
-	switch (type) {
+	int resolved = resolve_window_setting_id(type);
+	switch (resolved) {
 	case WINDOW_SETTINGS_ASPECT_RATIO:
 		*value = window_settings.aspect_ratio;
 		break;
@@ -709,6 +747,11 @@ static void service_variable_erase(struct service_variable **store, struct strin
 	static bool prefix##_IsExist(struct string *key) { return service_variable_exists(&store, key); } \
 	static void prefix##_Set(struct string *key, struct string *value) { service_variable_set(&store, key, value); } \
 	static struct string *prefix##_Get(struct string *key) { return service_variable_get(&store, key); } \
+	static void prefix##_Get_v8(struct string **out, struct string *key) { \
+		if (!out) return; \
+		if (*out) free_string(*out); \
+		*out = key ? service_variable_get(&store, key) : string_ref(&EMPTY_STRING); \
+	} \
 	static void prefix##_Erase(struct string *key) { service_variable_erase(&store, key); } \
 	static int prefix##_NumofKey(void) { \
 		int n = 0; for (struct service_variable *v = store; v; v = v->next) n++; return n; \
@@ -717,6 +760,14 @@ static void service_variable_erase(struct service_variable **store, struct strin
 		for (struct service_variable *v = store; v; v = v->next) \
 			if (!index--) return string_ref(v->value); \
 		return string_ref(&EMPTY_STRING); \
+	} \
+	static void prefix##_GetKey_v8(struct string **out, int index) { \
+		if (!out) return; \
+		if (*out) free_string(*out); \
+		for (struct service_variable *v = store; v; v = v->next) { \
+			if (!index--) { *out = string_ref(v->key); return; } \
+		} \
+		*out = string_ref(&EMPTY_STRING); \
 	}
 
 SERVICE_VARIABLE_FUNCTIONS(SystemVariable, system_variables)
@@ -805,9 +856,19 @@ static bool SystemService_IsViewResizableMode(void)
 
 static bool SystemService_SetWaitVSyncMode(int mode)
 {
-	window_settings.wait_vsync = !!mode;
-	gfx_set_wait_vsync(window_settings.wait_vsync);
+	bool want = !!mode;
+	if (window_settings.wait_vsync != want) {
+		window_settings.wait_vsync = want;
+		gfx_set_wait_vsync(want);
+		save_window_settings();
+	}
 	return true;
+}
+
+void system_service_sync_wait_vsync(bool wait_vsync)
+{
+	window_settings.wait_vsync = wait_vsync;
+	gfx_set_wait_vsync(wait_vsync);
 }
 
 static int SystemService_GetWaitVSyncMode(void)
@@ -1166,6 +1227,7 @@ static bool SystemService_Load(struct page **in)
 
 static void SystemService_ModuleFini(void)
 {
+	input_reset_close_hook();
 	for (int i = 0; i < nr_backup_save_files; i++)
 		free(backup_save_files[i]);
 	free(backup_save_files);
@@ -1345,5 +1407,25 @@ static void SystemService_PreLink(void)
 	if (fun && fun->nr_arguments == 1) {
 		static_library_replace(&lib_SystemService, "IsResetOnce",
 				SystemService_IsResetOnce_Drapeko);
+	}
+	fun = get_fun(libno, "GameVariable_Get");
+	if (fun && fun->return_type.data == AIN_VOID && fun->nr_arguments == 2) {
+		static_library_replace(&lib_SystemService, "GameVariable_Get",
+				GameVariable_Get_v8);
+	}
+	fun = get_fun(libno, "GameVariable_GetKey");
+	if (fun && fun->return_type.data == AIN_VOID && fun->nr_arguments == 2) {
+		static_library_replace(&lib_SystemService, "GameVariable_GetKey",
+				GameVariable_GetKey_v8);
+	}
+	fun = get_fun(libno, "SystemVariable_Get");
+	if (fun && fun->return_type.data == AIN_VOID && fun->nr_arguments == 2) {
+		static_library_replace(&lib_SystemService, "SystemVariable_Get",
+				SystemVariable_Get_v8);
+	}
+	fun = get_fun(libno, "SystemVariable_GetKey");
+	if (fun && fun->return_type.data == AIN_VOID && fun->nr_arguments == 2) {
+		static_library_replace(&lib_SystemService, "SystemVariable_GetKey",
+				SystemVariable_GetKey_v8);
 	}
 }

@@ -39,7 +39,7 @@ static TAILQ_HEAD(listhead, sprite) sprite_list = TAILQ_HEAD_INITIALIZER(sprite_
 static Texture wp = {0};
 static bool scene_reset_registered = false;
 
-#ifdef ALICEHUB_IOS
+#if defined(ALICEHUB_IOS) || defined(XSYSTEM4_EMBEDDED)
 void scene_end_session(void)
 {
 	while (!TAILQ_EMPTY(&sprite_list))
@@ -151,6 +151,10 @@ int scene_set_wp(int cg_no) {
 	if (!cg)
 		return 0;
 
+	if (!scene_reset_registered) {
+		gfx_register_reset_callback(scene_on_gl_reset, NULL);
+		scene_reset_registered = true;
+	}
 	gfx_delete_texture(&wp);
 	gfx_init_texture_with_cg(&wp, cg);
 	cg_free(cg);

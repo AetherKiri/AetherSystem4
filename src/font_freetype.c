@@ -521,6 +521,7 @@ static struct font *load_font_file(const char *path, const char *ps_name, FT_Lon
 
 	if (!font->font->charmap) {
 		WARNING("Font '%s' doesn't contain unicode charmap", path);
+		FT_Done_Face(font->font);
 #ifdef __ANDROID__
 		free(buf);
 #endif

@@ -245,8 +245,10 @@ static void effect_zoom_rl(Texture *dst, Texture *old, Texture *new, float rate)
 
 static void effect_oscillate(Texture *dst, Texture *old, Texture *new, float rate)
 {
-	int delta_x = (rand() % (dst->w / 10) - (dst->w / 20)) * (1.0f - rate);
-	int delta_y = (rand() % (dst->h / 10) - (dst->h / 20)) * (1.0f - rate);;
+	int rx = dst->w / 10;
+	int ry = dst->h / 10;
+	int delta_x = rx > 0 ? (int)((rand() % rx - (dst->w / 20)) * (1.0f - rate)) : 0;
+	int delta_y = ry > 0 ? (int)((rand() % ry - (dst->h / 20)) * (1.0f - rate)) : 0;
 
 	gfx_copy(dst, 0, 0, old, 0, 0, dst->w, dst->h);
 	gfx_copy(dst, delta_x, delta_y, new, 0, 0, dst->w, dst->h);
@@ -307,7 +309,7 @@ static effect_fun effect_functions[NR_EFFECTS] = {
 
 static bool effect_reset_registered = false;
 
-#ifdef ALICEHUB_IOS
+#if defined(ALICEHUB_IOS) || defined(XSYSTEM4_EMBEDDED)
 void effect_end_session(void)
 {
 	effect_fini();
@@ -415,6 +417,7 @@ int effect_update(float rate)
 	}
 
 	gfx_swap();
+	gfx_mark_frame_presented();
 	return 1;
 }
 

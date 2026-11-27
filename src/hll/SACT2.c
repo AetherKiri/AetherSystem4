@@ -196,7 +196,7 @@ void sact_ModuleFini(void)
 #endif
 }
 
-#ifdef ALICEHUB_IOS
+#if defined(ALICEHUB_IOS) || defined(XSYSTEM4_EMBEDDED)
 void sact_end_session(void)
 {
 	if (sprites) {
@@ -225,9 +225,10 @@ int sact_WP_SetSP(int sp_no)
 	struct sact_sprite *sp = sact_try_get_sprite(sp_no);
 	if (!sp)
 		return 0;
-	if (!sp->texture.handle)
+	Texture *tex = sprite_get_texture(sp);
+	if (!tex || !tex->handle)
 		return 0;
-	return scene_set_wp_texture(&sp->texture);
+	return scene_set_wp_texture(tex);
 }
 
 int sact_GetScreenWidth(void)
@@ -254,8 +255,10 @@ int sact_Update(void)
 		scene_render();
 		scene_is_dirty = false;
 		gfx_swap();
+		gfx_mark_frame_presented();
 		s_last_idle_mod_ms = SDL_GetTicks();
 	} else {
+		gfx_clear_frame_presented();
 		uint32_t now = SDL_GetTicks();
 		if (now - s_last_idle_mod_ms >= 30) {
 			s_last_idle_mod_ms = now;
@@ -433,6 +436,20 @@ int sact_SP_CreateCustom(int sp_no)
 	if (!sp) return 0;
 	sprite_init_custom(sp);
 	return true;
+}
+
+int sact_SP_CreateCopy(int dst_no, int src_no)
+{
+	struct sact_sprite *src = sact_try_get_sprite(src_no);
+	if (!src)
+		return 0;
+	if (dst_no == src_no)
+		return 1;
+	struct sact_sprite *dst = sact_get_sprite(dst_no);
+	if (!dst)
+		return 0;
+	sprite_init_copy(dst, src);
+	return 1;
 }
 
 int sact_SP_Delete(int sp_no)
@@ -831,7 +848,9 @@ void sact_IntToZenkaku(struct string **s, int value, int figures, int zero_pad)
 	int i;
 	char buf[512];
 
-	string_clear(*s);
+	if (!s)
+		return;
+	string_clear_ref(s);
 	i = int_to_cstr(buf, 512, value, figures, zero_pad, true);
 	string_append_cstr(s, buf, i);
 }
@@ -841,7 +860,9 @@ void sact_IntToHankaku(struct string **s, int value, int figures, int zero_pad)
 	int i;
 	char buf[512];
 
-	string_clear(*s);
+	if (!s)
+		return;
+	string_clear_ref(s);
 	i = int_to_cstr(buf, 512, value, figures, zero_pad, false);
 	string_append_cstr(s, buf, i);
 }
@@ -891,7 +912,7 @@ bool sact_Joypad_GetAnalogStickStatus(int num, int type, float *degree, float *p
 	return joy_get_stick_status(num, type, degree, power);
 }
 
-bool sact_Joypad_GetDigitalStickStatus(int num, int type, bool *left, bool *right, bool *up, bool *down)
+bool sact_Joypad_GetDigitalStickStatus(int num, int type, int *left, int *right, int *up, int *down)
 {
 	handle_events();
 	return joy_get_digital_stick_status(num, type, left, right, up, down);
@@ -1191,7 +1212,7 @@ void sact_DX_SetUsePower2Texture(bool use)
 	HLL_EXPORT(SetVolumeMixerBGMGroupNum, SACTDX_SetVolumeMixerBGMGroupNum), \
 	HLL_EXPORT(Sound_GetGroupNumFromDataNum, wav_get_group_num_from_data_num), \
 	HLL_EXPORT(SP_DeleteAll, sact_SP_DeleteAll),	\
-	HLL_TODO_EXPORT(SP_CreateCopy, SACTDX_SP_CreateCopy),	\
+	HLL_EXPORT(SP_CreateCopy, sact_SP_CreateCopy),	\
 	HLL_TODO_EXPORT(Joypad_GetAnalogStickStatus, SACTDX_Joypad_GetAnalogStickStatus), \
 	HLL_TODO_EXPORT(GetDigitalStickStatus, SACTDX_GetDigitalStickStatus), \
 	HLL_EXPORT(Key_ClearFlagNoCtrl, sact_Key_ClearFlagNoCtrl), \

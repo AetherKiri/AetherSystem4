@@ -246,6 +246,8 @@ static void texthook_keywait(void) {}
 static void cancel_yield(void) {}
 static void msg_hitAnyKey(void) { ++marks; }
 static bool event_rawkey_down(int code) { assert(code == KEY_CTRL); return true; }
+static bool sys_is_quit_requested(void) { return false; }
+static void nact_quit(bool force) { (void)force; }
 static int sys_getInputInfo(void)
 {
     assert(polls < 2);
@@ -1382,8 +1384,12 @@ int main(void)
                  "-I", str(hub), "-I", str(engine / "include"), "-I", str(libsys4 / "include"),
                  *(str(hub / name) for name in ("model.c", "save_store.c", "save_codec.c")),
                  str(fs_util),
-                 str(engine / "src/savedata.c"), str(libsys4 / "src/file.c"),
-                 str(libsys4 / "src/system.c"), "-x", "c", "-", "-lz", "-o", str(exe)],
+                 str(engine / "src/savedata.c"),
+                 *(str(libsys4 / "src" / name) for name in (
+                     "ain.c", "buffer.c", "file.c", "hashtable.c", "instructions.c",
+                     "mt19937int.c", "savefile.c", "string.c", "system.c", "utfsjis.c", "zlib.c",
+                 )),
+                 "-x", "c", "-", "-lz", "-o", str(exe)],
                 input=r"""
 #include "save_store.h"
 #include "fs_util.h"

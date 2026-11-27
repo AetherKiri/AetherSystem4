@@ -5,6 +5,7 @@
 #undef main
 #include "embedded.h"
 #include "modifier.h"
+#include "vm/page.h"
 #include <setjmp.h>
 #include <pthread.h>
 
@@ -137,7 +138,12 @@ int xsystem4_host_run(const struct xsystem4_host *host, const char *game,
 		free(path);
 		if (!ain) ERROR("%s", ain_strerror(error));
 		mkdir_p(config.save_dir);
+		savedir_begin_memory_session();
 		apply_game_specific_hacks(ain);
+		parts_set_mixed_display_text(
+			game_maman || game_haharanman || game_escalayer_reboot
+			|| game_pascha3 || game_night_remaster || game_evenicle2_rance
+			|| game_rance01 || game_rance8 || game_haniwapetit);
 		init_mai_word_table();
 		init_text_dict();
 		if (config.msgskip_delay) set_msgskip_delay(ain, config.msgskip_delay);
@@ -158,7 +164,11 @@ int xsystem4_host_run(const struct xsystem4_host *host, const char *game,
 		case 5: asset_manager_fini(); break;
 		case 6: if (ain) ain_free(ain); ain = NULL; break;
 		case 7:
+			ini_abort_parse();
+			page_end_session();
 			modifier_end_session();
+			savedir_cleanup_memory_saves();
+			input_end_session();
 			sys4_reset_text_dict();
 			sys4_reset_mai_word_table();
 			reset_config();

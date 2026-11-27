@@ -172,6 +172,7 @@ static bool is_background_flush_save(const char *path)
 		return false;
 #ifdef _WIN32
 	return !_stricmp(base, "GlobalSave.asd") ||
+	       !_stricmp(base, "GlobalSaveData.asd") ||
 	       !_stricmp(base, "Collection.asd") ||
 	       !_stricmp(base, "GameConfig.asd") ||
 	       !_stricmp(base, "GameEnquete.asd") ||
@@ -180,6 +181,7 @@ static bool is_background_flush_save(const char *path)
 	       !_stricmp(base, "AFInfo.asd");
 #else
 	return !strcasecmp(base, "GlobalSave.asd") ||
+	       !strcasecmp(base, "GlobalSaveData.asd") ||
 	       !strcasecmp(base, "Collection.asd") ||
 	       !strcasecmp(base, "GameConfig.asd") ||
 	       !strcasecmp(base, "GameEnquete.asd") ||
@@ -309,12 +311,13 @@ static int commit_switch_save(const char *tmp_path, const char *path)
 
 bool atomic_save_commit(FILE *fp, const char *path, char *tmp_path, bool keep_backup)
 {
+	bool volatile_mem = savedir_is_memory_save_path(path);
 	bool ok = !ferror(fp) && fflush(fp) == 0;
 #ifdef _WIN32
-	if (ok && _commit(_fileno(fp)) != 0)
+	if (ok && !volatile_mem && _commit(_fileno(fp)) != 0)
 		ok = false;
 #else
-	if (ok && fsync(fileno(fp)) != 0 && errno != EINVAL && errno != EROFS)
+	if (ok && !volatile_mem && fsync(fileno(fp)) != 0 && errno != EINVAL && errno != EROFS)
 		ok = false;
 #endif
 	if (fclose(fp) != 0)
@@ -326,7 +329,7 @@ bool atomic_save_commit(FILE *fp, const char *path, char *tmp_path, bool keep_ba
 		return false;
 	}
 
-	if (keep_backup && file_exists(path) && file_size(path) > 16) {
+	if (!volatile_mem && keep_backup && file_exists(path) && file_size(path) > 16) {
 		char *bak = make_backup_path(path);
 		file_copy(path, bak);
 		free(bak);
@@ -350,6 +353,7 @@ bool atomic_save_commit(FILE *fp, const char *path, char *tmp_path, bool keep_ba
 		free(tmp_path);
 		return false;
 	}
+	file_note_fs_mutation();
 	free(tmp_path);
 	return true;
 }
@@ -969,15 +973,20 @@ char *save_transcode_cstr_strict(const char *s, size_t len, bool src_is_gbk, boo
 	return res;
 }
 
-struct string *save_decode_vm_string(const char *s, size_t len, bool src_is_gbk)
+static struct string *save_decode_vm_string_to(const char *s, size_t len, bool src_is_gbk, bool dst_is_gbk)
 {
 	if (!s || len == 0)
 		return make_string("", 0);
 	size_t out_len = 0;
-	char *conv = save_transcode_cstr(s, len, src_is_gbk, sys4_text_is_gbk, &out_len);
+	char *conv = save_transcode_cstr(s, len, src_is_gbk, dst_is_gbk, &out_len);
 	struct string *str = make_string(conv, out_len);
 	free(conv);
 	return str;
+}
+
+struct string *save_decode_vm_string(const char *s, size_t len, bool src_is_gbk)
+{
+	return save_decode_vm_string_to(s, len, src_is_gbk, sys4_text_is_gbk);
 }
 
 static size_t utf8_to_canon_u32(const char *utf8, uint32_t *out, size_t max_len)
@@ -1689,17 +1698,89 @@ static bool gsave_struct_matches(const struct ain_struct *st, const char *struct
 	return true;
 }
 
-static union vm_value gsave_to_vm_value(struct gsave *save, enum ain_data_type type, int struct_type, int array_rank, int32_t value, bool src_is_gbk);
-static union vm_value gsave_to_vm_value_typed(struct gsave *save, const struct ain_type *type, int32_t value, bool src_is_gbk);
+static bool ain_has_function_name(const char *name)
+{
+	if (!ain || !name || !name[0])
+		return false;
+	for (int i = 0; i < ain->nr_functions; i++) {
+		const char *fn = ain->functions[i].name;
+		if (fn && fn[0] == name[0] && !strcmp(fn, name))
+			return true;
+	}
+	return false;
+}
+
+struct gsave_str_ctx {
+	bool src_is_gbk;
+	bool dst_is_gbk;
+	bool raw_lookup_keys;
+};
+
+static struct string *save_decode_raw_lookup_key(const char *s, size_t len,
+		bool default_src_is_gbk, bool dst_is_gbk)
+{
+	if (!s || len == 0)
+		return make_string("", 0);
+	if (cjk_is_ascii_only(s))
+		return make_string(s, len);
+
+	// 1. Exact native AIN function name (Recall / EventSkip keys): never rewrite.
+	if (ain_has_function_name(s))
+		return make_string(s, len);
+
+	// 2. Opposite-encoding candidate verified against AIN function table.
+	size_t cand_len = 0;
+	char *cand = save_transcode_cstr_strict(s, len, !dst_is_gbk, dst_is_gbk, &cand_len);
+	if (cand && ain_has_function_name(cand)) {
+		struct string *str = make_string(cand, cand_len);
+		free(cand);
+		return str;
+	}
+
+	// 3. Per-string encoding classification for non-function keys (e.g. CG keys
+	//    from .ex) so a mixed-encoding save never corrupts already-native keys
+	//    when opposite-encoding entries outnumber them.
+	int bias = save_text_gbk_bias(s);
+	bool convert = false;
+	if (cand) {
+		if (!dst_is_gbk) {
+			// Target CP932: convert only keys that clearly look GBK; keep
+			// native CP932 and unverified ambiguous bytes untouched.
+			convert = (bias > 0);
+		} else {
+			// Target GBK: convert keys that look CP932 (or neutral in a CP932 save);
+			// never corrupt keys that already look GBK.
+			convert = (bias < 0) || (bias == 0 && !default_src_is_gbk);
+		}
+	}
+	if (!convert) {
+		free(cand);
+		return make_string(s, len);
+	}
+	struct string *str = make_string(cand, cand_len);
+	free(cand);
+	return str;
+}
+
+static struct string *save_decode_gsave_string(const char *s, size_t len, const struct gsave_str_ctx *ctx)
+{
+	if (ctx->raw_lookup_keys)
+		return save_decode_raw_lookup_key(s, len, ctx->src_is_gbk, ctx->dst_is_gbk);
+	return save_decode_vm_string_to(s, len, ctx->src_is_gbk, ctx->dst_is_gbk);
+}
+
+static union vm_value gsave_to_vm_value(struct gsave *save, enum ain_data_type type, int struct_type, int array_rank, int32_t value, const struct gsave_str_ctx *ctx);
+static union vm_value gsave_to_vm_value_typed(struct gsave *save, const struct ain_type *type, int32_t value, const struct gsave_str_ctx *ctx);
 
 static struct gsave_flat_array *gsave_load_array(struct gsave *save, struct page *page,
-		struct gsave_flat_array *flat_array, struct gsave_flat_array *flat_end, bool src_is_gbk)
+		struct gsave_flat_array *flat_array, struct gsave_flat_array *flat_end,
+		const struct gsave_str_ctx *ctx)
 {
 	if (!page || page->type != ARRAY_PAGE)
 		VM_ERROR("Bad save file: invalid array page");
 	if (nested_array(page)) {
 		for (int i = 0; i < page->nr_vars; i++)
-			flat_array = gsave_load_array(save, heap_get_page(page->values[i].i), flat_array, flat_end, src_is_gbk);
+			flat_array = gsave_load_array(save, heap_get_page(page->values[i].i), flat_array, flat_end, ctx);
 		return flat_array;
 	}
 
@@ -1714,15 +1795,15 @@ static struct gsave_flat_array *gsave_load_array(struct gsave *save, struct page
 		    !(data_type == AIN_REF_STRUCT && flat_array->values[i].type == AIN_STRUCT))
 			VM_ERROR("Bad save file: unexpected array element type");
 		const struct ain_type *type = variable_full_type(page, i);
-		union vm_value val = type ? gsave_to_vm_value_typed(save, type, flat_array->values[i].value, src_is_gbk)
-			: gsave_to_vm_value(save, data_type, struct_type, array_rank, flat_array->values[i].value, src_is_gbk);
+		union vm_value val = type ? gsave_to_vm_value_typed(save, type, flat_array->values[i].value, ctx)
+			: gsave_to_vm_value(save, data_type, struct_type, array_rank, flat_array->values[i].value, ctx);
 		variable_fini(page->values[i], data_type, false);
 		page->values[i] = val;
 	}
 	return flat_array + 1;
 }
 
-static union vm_value gsave_to_vm_value(struct gsave *save, enum ain_data_type type, int struct_type, int array_rank, int32_t value, bool src_is_gbk)
+static union vm_value gsave_to_vm_value(struct gsave *save, enum ain_data_type type, int struct_type, int array_rank, int32_t value, const struct gsave_str_ctx *ctx)
 {
 	switch (type) {
 	case AIN_VOID:
@@ -1749,8 +1830,8 @@ static union vm_value gsave_to_vm_value(struct gsave *save, enum ain_data_type t
 				if (!save->strings[value]->size) {
 					heap[slot].s = string_ref(&EMPTY_STRING);
 				} else {
-					heap[slot].s = save_decode_vm_string(save->strings[value]->text,
-						save->strings[value]->size, src_is_gbk);
+					heap[slot].s = save_decode_gsave_string(save->strings[value]->text,
+						save->strings[value]->size, ctx);
 				}
 			}
 			return vm_int(slot);
@@ -1799,7 +1880,7 @@ static union vm_value gsave_to_vm_value(struct gsave *save, enum ain_data_type t
 				enum ain_data_type data_type = variable_type(page, index, &m_struct_type, &m_array_rank);
 				if (data_type != field_type)
 					VM_ERROR("Bad save file: structure member type mismatch");
-				union vm_value val = gsave_to_vm_value_typed(save, &st->members[index].type, kv->value, src_is_gbk);
+				union vm_value val = gsave_to_vm_value_typed(save, &st->members[index].type, kv->value, ctx);
 				variable_fini(page->values[index], data_type, false);
 				page->values[index] = val;
 			}
@@ -1831,7 +1912,7 @@ static union vm_value gsave_to_vm_value(struct gsave *save, enum ain_data_type t
 			free(dims);
 			struct gsave_flat_array *flat_end = array->flat_arrays
 				? array->flat_arrays + array->nr_flat_arrays : NULL;
-			gsave_load_array(save, page, array->flat_arrays, flat_end, src_is_gbk);
+			gsave_load_array(save, page, array->flat_arrays, flat_end, ctx);
 			return vm_int(slot);
 		}
 	case AIN_REF_TYPE:
@@ -1860,10 +1941,10 @@ static struct page *v12_saved_array_new(const struct ain_type *type, int rank, i
 	return page;
 }
 
-static union vm_value gsave_to_vm_value_typed(struct gsave *save, const struct ain_type *type, int32_t value, bool src_is_gbk)
+static union vm_value gsave_to_vm_value_typed(struct gsave *save, const struct ain_type *type, int32_t value, const struct gsave_str_ctx *ctx)
 {
 	if (type->data != AIN_ARRAY)
-		return gsave_to_vm_value(save, type->data, type->struc, type->rank, value, src_is_gbk);
+		return gsave_to_vm_value(save, type->data, type->struc, type->rank, value, ctx);
 	if (value < 0 || value >= save->nr_arrays)
 		VM_ERROR("Bad save file: invalid generic array index %d", value);
 	struct gsave_array *array = &save->arrays[value];
@@ -1871,7 +1952,7 @@ static union vm_value gsave_to_vm_value_typed(struct gsave *save, const struct a
 	struct page *page = v12_saved_array_new(type, array->rank, array->dimensions);
 	struct gsave_flat_array *flat_end = array->flat_arrays
 		? array->flat_arrays + array->nr_flat_arrays : NULL;
-	gsave_load_array(save, page, array->flat_arrays, flat_end, src_is_gbk);
+	gsave_load_array(save, page, array->flat_arrays, flat_end, ctx);
 	return vm_int(heap_alloc_page(page));
 }
 
@@ -1992,16 +2073,70 @@ static int *resolve_gsave_globals(struct gsave *save, const char *group_name)
 	return resolved;
 }
 
-static bool gsave_uses_raw_lookup_keys(const char *keyname, const char *group_name)
+static bool gsave_is_raw_lookup_extra_group(const char *keyname, const char *group_name)
 {
-	// These GBK releases keep CP932 identifiers in their progress arrays.
-	return sys4_text_is_gbk
-		&& ((game_maman && !strcmp(keyname, "MAMAN_EXTRA") && !strcmp(group_name, "MAMAN_EXTRA_DATA"))
-			|| (game_haharanman && !strcmp(keyname, "MIBOUJIN_EXTRA") && !strcmp(group_name, "MIBOUJIN_EXTRA_DATA")));
+	if (!keyname || !group_name)
+		return false;
+	if (game_maman && !strcmp(keyname, "MAMAN_EXTRA") && !strcmp(group_name, "MAMAN_EXTRA_DATA"))
+		return true;
+	if (game_haharanman
+			&& ((!strcmp(keyname, "MIBOUJIN_EXTRA") && !strcmp(group_name, "MIBOUJIN_EXTRA_DATA"))
+				|| (!strcmp(keyname, "MIBOUJIN_USER") && !strcmp(group_name, "MIBOUJIN_USER_DATA"))))
+		return true;
+	if (game_escalayer_reboot
+			&& ((!strcmp(keyname, "ESCA_OMAKE") && !strcmp(group_name, "ESCA_OMAKE_DATA"))
+				|| (!strcmp(keyname, "ESCA_USER") && !strcmp(group_name, "ESCA_USER_DATA"))))
+		return true;
+	if (game_pascha3
+			&& ((!strcmp(keyname, "PC3_OMAKE") && !strcmp(group_name, "PC3_OMAKE_DATA"))
+				|| (!strcmp(keyname, "PC3_USER") && !strcmp(group_name, "PC3_USER_DATA"))))
+		return true;
+	if (game_night_remaster
+			&& !strcmp(keyname, "seEfa0ea?d8sdvaAekfe")
+			&& !strcmp(group_name, "SaveGroup_MemModeInfo"))
+		return true;
+	if (game_rance01
+			&& save_names_equal(keyname, "\x89\xbc\x83\x4c\x81\x5b\x96\xbc")
+			&& save_names_equal(group_name, "\x8b\xa4\x97\x4c\x83\x66\x81\x5b\x83\x5e"))
+		return true;
+	if (game_haruka
+			&& save_names_equal(keyname, "\x92\xb4\x8d\x56\x91\x4d\x94\x45\x83\x5a\x81\x5b\x83\x75\x83\x4c\x81\x5b")
+			&& !strcmp(group_name, "SomeFlag"))
+		return true;
+	return false;
+}
+
+static bool gsave_target_is_gbk(const char *keyname, const char *group_name)
+{
+	if (!sys4_text_is_gbk)
+		return false;
+	if (!gsave_is_raw_lookup_extra_group(keyname, group_name))
+		return true;
+	if (sys4_source_is_utf8)
+		return true;
+	// Partial CN releases of Heartful Maman / Haha Ranman keep CP932 lookup keys
+	// in .ain/.ex identifiers, while fully-GBK builds transcode identifiers too.
+	int bias = 0;
+	int sampled = 0;
+	for (int i = 0; ain && i < ain->nr_global_groups && sampled < 16; i++) {
+		const char *g = ain->global_group_names[i];
+		if (g && !cjk_is_ascii_only(g)) {
+			bias += save_text_gbk_bias(g);
+			sampled++;
+		}
+	}
+	for (int i = 0; ain && i < ain->nr_functions && sampled < 64; i++) {
+		const char *fn = ain->functions[i].name;
+		if (fn && !cjk_is_ascii_only(fn)) {
+			bias += save_text_gbk_bias(fn);
+			sampled++;
+		}
+	}
+	return bias > 15;
 }
 
 static bool gsave_detect_is_gbk(const struct gsave *save, const int *resolved,
-		const char *keyname, const char *group_name)
+		const char *keyname, const char *group_name, bool default_is_gbk)
 {
 	int native_votes = 0;
 	int opp_votes = 0;
@@ -2030,19 +2165,23 @@ static bool gsave_detect_is_gbk(const struct gsave *save, const int *resolved,
 			opp_votes += 10;
 	}
 	if (opp_votes > native_votes)
-		return !sys4_text_is_gbk;
+		return !default_is_gbk;
 	if (native_votes > opp_votes)
-		return sys4_text_is_gbk;
+		return default_is_gbk;
 	int bias = 0;
-	for (int i = 0; i < save->nr_strings && i < 64; i++) {
-		if (save->strings[i] && save->strings[i]->size > 0)
+	int sampled = 0;
+	for (int i = 0; i < save->nr_strings && sampled < 64; i++) {
+		if (save->strings[i] && save->strings[i]->size > 0
+				&& !cjk_is_ascii_only(save->strings[i]->text)) {
 			bias += save_text_gbk_bias(save->strings[i]->text);
+			sampled++;
+		}
 	}
 	if (bias > 15)
 		return true;
 	if (bias < -15)
 		return false;
-	return sys4_text_is_gbk;
+	return default_is_gbk;
 }
 
 int load_globals_from_gsave(struct gsave *save, const char *keyname, const char *group_name, int *n)
@@ -2057,8 +2196,12 @@ int load_globals_from_gsave(struct gsave *save, const char *keyname, const char 
 		VM_ERROR("Attempted to load save data with wrong group name: '%s'", display_sjis0(group_name));
 
 	int *resolved = resolve_gsave_globals(save, group_name);
-	bool src_is_gbk = gsave_uses_raw_lookup_keys(keyname, group_name)
-		|| gsave_detect_is_gbk(save, resolved, keyname, group_name);
+	bool dst_is_gbk = gsave_target_is_gbk(keyname, group_name);
+	struct gsave_str_ctx str_ctx = {
+		.src_is_gbk = gsave_detect_is_gbk(save, resolved, keyname, group_name, dst_is_gbk),
+		.dst_is_gbk = dst_is_gbk,
+		.raw_lookup_keys = gsave_is_raw_lookup_extra_group(keyname, group_name),
+	};
 	int retval = 1;
 	for (int gi = 0; gi < save->nr_globals; gi++) {
 		struct gsave_global *g = &save->globals[gi];
@@ -2081,7 +2224,7 @@ int load_globals_from_gsave(struct gsave *save, const char *keyname, const char 
 			continue;
 		}
 		bool call_dtors = false; // Destructors for old objects should not be called.
-		global_set(global_index, gsave_to_vm_value_typed(save, type, g->value, src_is_gbk), call_dtors);
+		global_set(global_index, gsave_to_vm_value_typed(save, type, g->value, &str_ctx), call_dtors);
 		if (n)
 			(*n)++;
 	}
@@ -2091,6 +2234,8 @@ cleanup:
 	return retval;
 }
 
+static char *make_comment_sidecar_path(const char *base);
+
 int load_globals(const char *keyname, const char *filename, const char *group_name, int *n)
 {
 	if (n)
@@ -2099,11 +2244,13 @@ int load_globals(const char *keyname, const char *filename, const char *group_na
 	int retval;
 
 	bool is_cfg = is_game_config_save(filename);
+	bool primary_valid = false;
 
 	// First, try reading as a gsave.
 	enum savefile_error error;
 	struct gsave *save = gsave_read(path, &error);
 	if (error == SAVEFILE_SUCCESS) {
+		primary_valid = true;
 		retval = load_globals_from_gsave(save, keyname, group_name, n);
 		gsave_free(save);
 		if (retval) {
@@ -2133,28 +2280,29 @@ int load_globals(const char *keyname, const char *filename, const char *group_na
 		WARNING("%s: %s", display_utf0(path), savefile_strerror(error));
 	}
 
-	// Fall back to .bak if a backup exists (e.g. GlobalSave.asd.bak / Collection.asd.bak).
+	// Fall back to .bak if the primary save failed to parse and a backup exists.
 	char *bak_path = make_backup_path(path);
 	bool had_any_file = file_exists(path) || file_exists(bak_path);
-	if (file_exists(bak_path)) {
+	if (!primary_valid && file_exists(bak_path)) {
 		enum savefile_error bak_err;
 		struct gsave *bak_save = gsave_read(bak_path, &bak_err);
 		if (bak_err == SAVEFILE_SUCCESS) {
-			WARNING("Recovered corrupted save %s from backup %s", display_utf0(path), display_utf0(bak_path));
-			file_copy(bak_path, path);
-			free(bak_path);
-			free(path);
 			retval = load_globals_from_gsave(bak_save, keyname, group_name, n);
 			gsave_free(bak_save);
 			if (retval) {
+				WARNING("Recovered corrupted save %s from backup %s",
+						display_utf0(path), display_utf0(bak_path));
+				file_copy(bak_path, path);
+				free(bak_path);
+				free(path);
 				track_global_save(keyname, filename, group_name);
 				if (is_cfg)
 					modifier_on_config_loaded();
 				modifier_on_globals_loaded();
-			} else if (is_cfg) {
-				modifier_on_config_loaded();
+				return retval;
 			}
-			return retval;
+			if (n)
+				*n = 0;
 		}
 	}
 	free(bak_path);
@@ -2174,6 +2322,10 @@ int delete_save_file(const char *filename)
 	if (file_exists(bak_path))
 		remove_utf8(bak_path);
 	free(bak_path);
+	char *comment_path = make_comment_sidecar_path(path);
+	if (file_exists(comment_path))
+		remove_utf8(comment_path);
+	free(comment_path);
 	if (!file_exists(path)) {
 		free(path);
 		return 0;
@@ -2187,18 +2339,29 @@ int delete_save_file(const char *filename)
 	return 1;
 }
 
+static void (*background_flush_hook)(void) = NULL;
+
+void savedata_set_background_flush_hook(void (*hook)(void))
+{
+	background_flush_hook = hook;
+}
+
 void savedata_flush_on_background(void)
 {
-	if (flushing_background_saves || !ain || !heap || heap_size <= 0)
+	if (flushing_background_saves)
 		return;
 	flushing_background_saves = true;
-	for (int i = 0; i < nr_tracked_global_saves; i++) {
-		const struct tracked_global_save *entry = &tracked_global_saves[i];
-		if (!entry->keyname || !entry->filename || !entry->group_name)
-			continue;
-		if (get_group_index(entry->group_name) < 0)
-			continue;
-		save_globals(entry->keyname, entry->filename, entry->group_name, NULL);
+	if (background_flush_hook)
+		background_flush_hook();
+	if (ain && heap && heap_size > 0) {
+		for (int i = 0; i < nr_tracked_global_saves; i++) {
+			const struct tracked_global_save *entry = &tracked_global_saves[i];
+			if (!entry->keyname || !entry->filename || !entry->group_name)
+				continue;
+			if (get_group_index(entry->group_name) < 0)
+				continue;
+			save_globals(entry->keyname, entry->filename, entry->group_name, NULL);
+		}
 	}
 	flushing_background_saves = false;
 }
@@ -2716,6 +2879,19 @@ struct x4ss_load_ctx {
 	bool *is_root;
 };
 
+static void x4ss_skip_tagged_value_depth(struct x4ss_reader *r, uint8_t tag, int depth)
+{
+	switch (tag) {
+	case X4SS_VAL_NONE: break;
+	case X4SS_VAL_SCALAR: x4ss_get_i32(r); break;
+	case X4SS_VAL_STRING: { uint32_t l = x4ss_get_u32(r); x4ss_get_bytes(r, NULL, l); break; }
+	case X4SS_VAL_OBJ: x4ss_get_u32(r); break;
+	case X4SS_VAL_IFACE: case X4SS_VAL_PAGE_VAR: x4ss_get_u32(r); x4ss_get_i32(r); break;
+	case X4SS_VAL_OPTION: if (!x4ss_get_u8(r)) x4ss_skip_value_depth(r, depth + 1); break;
+	default: r->error = true; break;
+	}
+}
+
 static void x4ss_read_value_depth(struct x4ss_load_ctx *ctx, struct x4ss_reader *r,
 		union vm_value *dst, const struct ain_type *t, bool has_existing, int depth)
 {
@@ -2727,16 +2903,7 @@ static void x4ss_read_value_depth(struct x4ss_load_ctx *ctx, struct x4ss_reader 
 	if (r->error)
 		return;
 	if (!t || t->data == AIN_VOID || t->data == AIN_DELEGATE || t->data == AIN_REF_DELEGATE) {
-		/* Re-wind tag? No, consume remainder of tag payload cleanly */
-		switch (tag) {
-		case X4SS_VAL_NONE: break;
-		case X4SS_VAL_SCALAR: x4ss_get_i32(r); break;
-		case X4SS_VAL_STRING: { uint32_t l = x4ss_get_u32(r); x4ss_get_bytes(r, NULL, l); break; }
-		case X4SS_VAL_OBJ: x4ss_get_u32(r); break;
-		case X4SS_VAL_IFACE: case X4SS_VAL_PAGE_VAR: x4ss_get_u32(r); x4ss_get_i32(r); break;
-		case X4SS_VAL_OPTION: if (!x4ss_get_u8(r)) x4ss_skip_value_depth(r, depth + 1); break;
-		default: r->error = true; break;
-		}
+		x4ss_skip_tagged_value_depth(r, tag, depth);
 		return;
 	}
 
@@ -2750,7 +2917,8 @@ static void x4ss_read_value_depth(struct x4ss_load_ctx *ctx, struct x4ss_reader 
 	if (t->data == AIN_OPTION) {
 		int w = ain_type_slot_width(t);
 		if (tag != X4SS_VAL_OPTION) {
-			/* Fallback: default to none */
+			/* Consume mismatched payload so stream stays aligned, then default to none */
+			x4ss_skip_tagged_value_depth(r, tag, depth);
 			for (int k = 0; k < w - 1; k++)
 				dst[k].i = -1;
 			dst[w - 1].i = 1;
@@ -3046,7 +3214,10 @@ static bool gd_ss_parse(uint8_t *raw, uint32_t ulen, struct gd_ss_parsed *out)
 	}
 
 	/* C2: Root descriptor entries */
-	uint32_t root_cap = max(sec_cnt[2], 1u);
+	if (sec_cnt[2] > 16u * 1024u * 1024u)
+		goto fail;
+	uint32_t max_roots = (sec_off[3] - sec_off[2]) / 17u;
+	uint32_t root_cap = max(min(sec_cnt[2], max_roots), 1u);
 	out->root_ids = xcalloc(root_cap, sizeof(int32_t));
 	pos = sec_off[2];
 	for (uint32_t i = 0; i < sec_cnt[2] && pos < sec_off[3]; i++) {
@@ -5234,7 +5405,21 @@ int read_group_save_comment(const char *keyname, const char *filename, struct st
 			return 0;
 		}
 		if (gs->nr_comments > 0 && gs->comments && gs->comments[0]) {
-			*log_out = string_dup(gs->comments[0]);
+			const struct string *c = gs->comments[0];
+			if (c->size == 0 || cjk_is_ascii_only(c->text)) {
+				*log_out = string_dup(c);
+			} else {
+				bool src_is_gbk = gsave_detect_is_gbk(gs, NULL, keyname, gs->group, sys4_text_is_gbk);
+				if (gs->nr_strings == 0 && (!gs->key || cjk_is_ascii_only(gs->key))
+						&& (!gs->group || cjk_is_ascii_only(gs->group))) {
+					int bias = save_text_gbk_bias(c->text);
+					if (bias > 15)
+						src_is_gbk = true;
+					else if (bias < -15)
+						src_is_gbk = false;
+				}
+				*log_out = save_decode_vm_string(c->text, c->size, src_is_gbk);
+			}
 			gsave_free(gs);
 			free(path);
 			return 1;
@@ -5250,7 +5435,13 @@ int read_group_save_comment(const char *keyname, const char *filename, struct st
 	free(cpath);
 	if (!data)
 		return 0;
-	*log_out = make_string((const char *)data, (unsigned int)len);
+	if (len == 0 || cjk_is_ascii_only((const char *)data)) {
+		*log_out = make_string((const char *)data, (unsigned int)len);
+	} else {
+		int bias = save_text_gbk_bias((const char *)data);
+		bool src_is_gbk = bias > 15 ? true : (bias < -15 ? false : sys4_text_is_gbk);
+		*log_out = save_decode_vm_string((const char *)data, len, src_is_gbk);
+	}
 	free(data);
 	return 1;
 }
