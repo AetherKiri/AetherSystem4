@@ -23,10 +23,12 @@ struct xsystem4_host {
 	void (*text_input)(void *user, int active);
 	// Normal script completion, including nonzero process exit codes.
 	void (*game_exit)(void *user, int code);
+	int fixed_encoding; /* 0 = automatic, 1 = Shift-JIS, 2 = GBK */
 };
 
 int xsystem4_host_run(const struct xsystem4_host *host, const char *game,
 		const char *save_directory, const char *font, const char *encoding);
+int xsystem4_host_encoding_override(void);
 void xsystem4_host_checkpoint(void);
 int xsystem4_host_poll_event(SDL_Event *event);
 void xsystem4_host_mouse_position(int *x, int *y, int set);

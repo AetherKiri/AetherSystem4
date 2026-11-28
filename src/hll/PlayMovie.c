@@ -42,7 +42,12 @@ static int PlayMovie_Play(void)
 	return movie_play(mc);
 }
 
-HLL_WARN_UNIMPLEMENTED(, void, PlayMovie, Stop, void);
+static void PlayMovie_Stop(void)
+{
+	if (mc)
+		movie_free(mc);
+	mc = NULL;
+}
 
 // PlayMovie is used like this:
 //
@@ -58,9 +63,16 @@ static int PlayMovie_IsPlay(void)
 {
 	if (!mc)
 		return false;
+	if (movie_is_end(mc))
+		return false;
 	if (!movie_draw(mc, NULL))
 		return false;
 	return !movie_is_end(mc);
+}
+
+static bool PlayMovie_SetVolume(int volume)
+{
+	return movie_set_volume(mc, volume);
 }
 
 static void PlayMovie_Release(void)
@@ -77,5 +89,6 @@ HLL_LIBRARY(PlayMovie,
 	    HLL_EXPORT(Play, PlayMovie_Play),
 	    HLL_EXPORT(Stop, PlayMovie_Stop),
 	    HLL_EXPORT(IsPlay, PlayMovie_IsPlay),
+	    HLL_EXPORT(SetVolume, PlayMovie_SetVolume),
 	    HLL_EXPORT(Release, PlayMovie_Release)
 	);
